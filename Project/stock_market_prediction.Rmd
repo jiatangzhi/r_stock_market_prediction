@@ -1,0 +1,475 @@
+---
+title: "Stock Market Prediction"
+author: "Jia Xin Tang Zhi"
+format: 
+  html:
+    toc: true
+    toc-location: left
+    page-layout: full
+    df-print: kable
+    fontsize: 1.0em
+    embed-resources: true
+---
+# Project :
+*Regression task*, where we want to predict stock returns from panel-type data (last columnn).
+
+## Import library
+
+```{r}
+#install.packages("tidyverse") 
+#install.packages("psych")
+#install.packages("lightgbm") 
+#install.packages("iml") 
+
+```
+
+# Data wrangling
+
+First, let's load the data & the packages.
+
+```{r}
+library(tidyverse)
+library(dplyr)              # for data manipulation
+library(ggplot2)            # For the plots
+library(gridExtra)          # to arrange 2 graphs in one row
+library(psych)              # for comprehensive summary
+library(rlang)              # for in-built functions
+library(forecast)           # for forecasting future values
+library(lightgbm)           #for the model lightgbm
+
+```
+
+
+Let's load the dataset that comes in RData format. 
+
+```{r}
+load('stocks_clean.RData')  # loading the RData file
+return <- stocks_clean      # and assigning it to a variable  Return
+rm(stocks_clean)            # now that return is assigned, remove remove returns to save memory
+```
+
+```{r}
+dim(return)   # Dimension of the dataframe
+``` 
+
+```{r}
+head(return)  # Look at the first and last observations of the dataframe
+```
+
+```{r}
+tail(return)
+```
+
+
+We can see that there are 289271 observations (rows) and 13 variables (features) so the dataset is quite large.
+- The last variable called **"return"** is the target variable amd well positioned at the last column.
+- We removed the columns **"ghg_s1"**, **"ghg_s2"**, **"ghg_s3"**, because it is irrelevant.
+
+
+
+
+
+## Structure and statistics of the dataset
+
+### Structure
+
+```{r}
+str(return[,1:13])    # Provides the structure , datatype
+```
+
+There seems to be character, Date and numerical type of data. Let’s have a precise view using the module class.
+
+```{r}
+sapply(return, class) |> table() |> head()
+```
+
+So the dataset is mainly composed by numeric variables and some are logical and others with characters. We will therefore need to use hot encoding to numericalize them if we want to use them as inputs in our ML algo.
+
+### Statistics
+
+```{r}
+
+
+statistics <- summary(return) #provides a summary of statistics for numerical values
+statistics_df <- as.data.frame(statistics) #creating a dataframe for better view assigning to a vector statistics_df
+
+# Then use the describe function
+describe_stats <- describe(statistics_df)
+describe_stats 
+
+```
+
+```{r}
+summary(return$return)  # descriptive summary of the predictive variable
+```
+
+```{r}
+psych::describe(return)  # more details 
+```
+
+```{r}
+# Calculate missing values
+sapply(return, function(x) sum(is.na(x)))
+```
+
+```{r}
+# Calculate the threshold for missing values
+threshold <- nrow(return) * 0.85
+
+# Remove columns where the number of missing values is greater than the threshold
+return <- return |>
+  select_if(~sum(is.na(.)) < threshold)
+
+# Replace NA values with the mean of each column with missing values
+return <- return |>
+  mutate(market_cap = ifelse(is.na(market_cap), mean(market_cap, na.rm = TRUE), market_cap),
+         price_to_book = ifelse(is.na(price_to_book), mean(price_to_book, na.rm = TRUE), price_to_book),
+         debt_to_equity = ifelse(is.na(debt_to_equity), mean(debt_to_equity, na.rm = TRUE), debt_to_equity),
+         profitability = ifelse(is.na(profitability), mean(profitability, na.rm = TRUE), profitability),
+         volatility = ifelse(is.na(volatility), mean(volatility, na.rm = TRUE), volatility),
+         revenue = ifelse(is.na(revenue), mean(revenue, na.rm = TRUE), revenue))
+
+sapply(return, function(x) sum(is.na(x)))
+```
+
+Couple of points to note :
+
+  1. The `market_cap` variable has a very high standard deviation relative to the mean,  indicating that the dataset includes companies of vastly different sizes, from small caps to large caps.
+
+  2. The `price_to_book` ratio shows significant variability as well, with some values as high as 12,351.61, suggesting there might be some highly valued companies compared to their book value.
+
+  3. Negative `debt_to_equity` for some companies, which might indicate more complex financial structures or situations where shareholder's equity is negative.
+
+  4. The `profitability` variable has an exceptionally wide range, with the minimum being a large negative number and the maximum being very high, indicating some companies are highly profitable while others are incurring substantial losses.
+
+  5. `revenue` has a high skewness value, suggesting the inclusion of companies with massive differences in sales figures, from losses/revenue deductions to substantial earnings.
+  
+  6. The greenhouse gas variables (`ghg_s1`, `ghg_s2` and `ghg_s3`) have very different counts of non-missing values, which could suggest data collection challenges or varying reporting standards across companies. We decided to remove these columns because this level of sparsity (~85%) provides little to no added value for our predictive accuracy and could potentially distort the outcome, leading to unreliable predictions.
+  
+  7. The `return` variable is quite stable with a mean close to zero and a small standard deviation, suggesting that the dataset might represent a balanced view of stock performance over time.
+  
+  8. The remaining missing values were replaced by the mean of each column.
+
+
+## Uni-variate Analysis
+
+### Categorical Values
+
+The only categorical value is "ticker" and we will analyse the 5 top ones.
+
+```{r}
+# Aggregated market_cap by ticker
+aggregated_data <- return |>
+  group_by(ticker) |>
+  summarise(total_market_cap = sum(market_cap, na.rm = TRUE))
+```
+
+```{r}
+# Filter for the top 20 tickers by market cap
+top_n <- 20 
+aggregated_data_top_n <- aggregated_data |>
+  top_n(n = top_n, wt = total_market_cap)
+
+```
+
+
+```{r}
+# Plot only the top N tickers
+ggplot(aggregated_data_top_n, aes(x = reorder(ticker, -total_market_cap), y = total_market_cap)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  theme_minimal() +
+  labs(title = "Total Market Cap by Ticker", x = "Ticker", y = "Total Market Cap") +
+  coord_flip() # Flip coordinates for horizontal bars
+
+```
+
+```{r}
+# Using the first 5 tickers to analyse
+top_tickers_data <- head(aggregated_data, 20)
+
+# Creating a pie chart
+ggplot(top_tickers_data, aes(x = "", y = total_market_cap, fill = ticker)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y") + # Convert the bar chart to a pie chart
+  theme_void() + # Remove background and axes
+  labs(title = "Market Cap Distribution Among Top Tickers") +
+  theme(legend.title = element_blank()) # Hide the legend title
+```
+
+So we observe that :
+* In the bar charts, coord_flip() is used to flip the chart for better readability, especially when dealing with many tickers.
+* Pie charts are not ideal for datasets with many categories because they can become cluttered and difficult to interpret, so we use only the top 20 tickers for simplicity. 
+
+### Numerical Values 
+
+```{r}
+plot_histogram_boxplot <- function(data, var_name) {
+  # Convert the variable name to a symbol for ggplot
+  var <- sym(var_name)
+  
+  # Create a histogram plot
+  p1 <- ggplot(data, aes(x = !!var)) +
+    geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+    theme_minimal() +
+    labs(title = paste("Histogram of", var_name), x = var_name, y = "Count")
+  
+  # Create a boxplot
+  p2 <- ggplot(data, aes(x = "", y = !!var)) +
+    geom_boxplot(fill = "tomato", color = "black") +
+    theme_minimal() +
+    labs(title = paste("Boxplot of", var_name), x = "", y = var_name)
+  
+  # Combine plots using grid.arrange
+  grid.arrange(p1, p2, ncol = 2)
+}
+```
+
+```{r}
+# List of quantitative variable names to plot
+quantitative_vars <- c("price", "market_cap", "price_to_book", "debt_to_equity", 
+                       "profitability", "volatility", "revenue", "return")
+
+# Loop through each variable and plot
+for(var_name in quantitative_vars) {
+  print(paste("Plotting for:", var_name)) # Print the variable name being plotted
+  plot_histogram_boxplot(return, var_name)
+}
+
+```
+
+
+# Modeling using ARIMA
+
+ARIMA models are well-suited for time series data that show patterns over time and can be made stationary through differentiation. It is useful for forecasting future points in a series based on its own past values (autoregression) and a moving average of past errors.
+* Use case for VARIMA: If the `return` variable shows autocorrelation over time (which means past returns are predictive of future returns)
+
+Due to the large amount stocks, we will explore some tickets in order to simplify it.
+
+## Example 1 - "AAPL US Equity" ticker
+### Data Preprocessing
+
+```{r}
+ticker_name <- "AAPL US Equity"  # Replace with the ticker you want to predict
+
+# Filter the data for the selected ticker
+ticker_data <- return |> filter(ticker == ticker_name)
+
+# Order the data by date
+ticker_data <- ticker_data |> arrange(date)
+
+```
+
+
+### Split the Data
+
+```{r}
+# Calculate the splitting index
+split_index <- floor(0.8 * nrow(ticker_data))
+
+# Create training and testing datasets
+train_data <- ticker_data[1:split_index, ]
+test_data <- ticker_data[(split_index + 1):nrow(ticker_data), ]
+
+```
+
+### Fit the VARIMA Model
+
+```{r}
+# Fit an ARIMA model
+return_arima <- auto.arima(train_data$return)
+summary(return_arima)
+
+```
+
+### Predicting Future Returns
+
+
+```{r}
+# Make predictions
+predictions <- forecast(return_arima, h = nrow(test_data))  # 'h' is the number of periods to predict
+
+# Plot the predictions against the actual test data
+plot(predictions)
+lines(test_data$date, test_data$return, col = "red")
+
+```
+
+The blue line in the graph likely represents the forecasted values generated by the ARIMA model for the specified future periods (as defined by `h = nrow(test_data)`). It is the model's best estimate of the time series' central tendency moving forward.
+
+Representation :
+
+* **Black Line* : This is the historical time series data upon which the model was trained.
+* **Blue Line** : This line is the point forecast from the ARIMA model, indicating the expected value of the series at each future point.
+* **Grey Shaded Area** : This usually depicts the prediction intervals (often 80% and 95% confidence intervals) around the point forecasts, representing the uncertainty in the forecasts. The lighter the shade of grey, the lower the confidence (i.e., the wider the interval).
+
+In the graph, the blue line shows where the model predicts the return will be, on average, for the next h periods. The shaded area around it indicates the level of confidence the model has in its predictions; the actual future values are expected to fall within this range most of the time, given the model assumptions hold true.
+
+The range of 0 to 300 on the x-axis of your ARIMA forecast plot represents the index of the observations in the time series data. This is a common default in time series plots when the time series object doesn't have an associated time/date attribute or when the plotting function isn't explicitly told to use a date variable for the x-axis. While the y-axis, labeled `return`, represents the values of the variable being forecast by the ARIMA(1,0,1) model
+
+### Performance Evaluation
+
+```{r}
+# Calculate accuracy metrics
+accuracy(predictions, test_data$return)
+
+```
+
+In the evaluation, *-Inf* and *Inf* values for **MPE** and **MAPE** suggest that there are cases where actual values are zero or very close to zero. In such cases, these percentage errors can become infinite or undefined, which is why they are not good measures for rendering these metrics unsuitable for this dataset.
+
+The **RMSE** value of *0.0902* for the test set indicates that the forecast errors are moderate, and ideally, we would look for a lower RMSE for better forecast accuracy. 
+The **MAE** is measured at *0.0769* for the test set, which similarly points to moderate errors; as with RMSE, a lower MAE would mean the predictions are closer to the actual values. 
+The **MASE** stands at *0.579* for the test set, which is less than 1, suggesting that the forecasting model is performing better than a naive benchmark model.
+
+## Example 2 - "ZIXI US Equity" ticker
+
+### Data Preprocessing 
+
+```{r}
+ticker_name <- "ZIXI US Equity"  # Replace with the ticker you want to predict
+
+# Filter the data for the selected ticker
+ticker_data <- return |> filter(ticker == ticker_name)
+
+# Order the data by date
+ticker_data <- ticker_data |> arrange(date)
+
+```
+
+### Split the Data
+
+```{r}
+# Calculate the splitting index
+split_index <- floor(0.8 * nrow(ticker_data))
+
+# Create training and testing datasets
+train_data <- ticker_data[1:split_index, ]
+test_data <- ticker_data[(split_index + 1):nrow(ticker_data), ]
+
+```
+
+### Fit the VARIMA Model
+
+```{r}
+# Fit an ARIMA model
+return_arima <- auto.arima(train_data$return)
+summary(return_arima)
+
+```
+
+### Predicting Future Returns
+
+```{r}
+# Make predictions
+predictions <- forecast(return_arima, h = nrow(test_data))  # 'h' is the number of periods to predict
+
+# Plot the predictions against the actual test data
+plot(predictions)
+lines(test_data$date, test_data$return, col = "red")
+
+```
+
+### Performance Evaluation
+
+```{r}
+# Calculate accuracy metrics
+accuracy(predictions, test_data$return)
+
+```
+
+The **RMSE** on the test set is *0.122*, which gives you an idea about the typical size of the forecast errors. The **MASE** being less than one (*0.337*) indicates that the model is performing better than a naive model for the test data set.
+
+# Modeling using lightGBM
+
+## Data Splitting
+
+In this section, we fit a boosted tree from the lightGBM package.
+We split the data in two, for simplicity: we won’t use **validation**.
+
+```{r}
+# Setting seed for reproducibility
+set.seed(123)
+
+# Data preparation
+train_indices <- sample(1:nrow(return), 0.8 * nrow(return))  # 80% for training
+train_data <- return[train_indices, ]
+remaining_indices <- setdiff(1:nrow(return), train_indices)  # Indices not in training set
+
+# Test set
+test_size <- 0.2  # 20% for testing
+test_indices <- sample(remaining_indices, test_size * length(remaining_indices))
+test_data <- return[test_indices, ]
+
+# Future validation set
+remaining_indices <- setdiff(remaining_indices, test_indices)  # Remove test indices
+validation_indices <- sample(remaining_indices, 0.2 * length(remaining_indices))  # 20% of remaining data for validation
+validation_data <- return[validation_indices, -which(names(return) == "return")]  # Remove 'return' column
+
+```
+
+
+```{r}
+# Convert data to LightGBM format
+train_data_lgb <- lgb.Dataset(data = as.matrix(train_data[, -which(names(train_data) == "return")]), label = train_data$return)
+test_data_lgb <- lgb.Dataset(data = as.matrix(test_data[, -1]), label = test_data$return, reference = train_data_lgb)
+
+# Define LightGBM parameters
+train_params <- list(
+  objective = "regression",  # Regression task
+  metric = "rmse",  # Root Mean Square Error as the evaluation metric
+  num_leaves = 31,  # Maximum number of leaves in one tree
+  learning_rate = 0.1,  # Learning rate
+  feature_fraction = 0.8,  # Percentage of features used per iteration
+  bagging_fraction = 0.8,  # Percentage of data used per iteration
+  bagging_freq = 5,  # Frequency for bagging
+  verbose = -1  # No print updates
+)
+
+```
+
+## Training
+
+```{r}
+lgb_model <- lgb.train(params = train_params,
+                       data = train_data_lgb,
+                       nrounds = 100,  # Number of boosting iterations (trees)
+                       valids = list(validation = test_data_lgb),
+                       early_stopping_rounds = 10)  # Early stopping
+
+```
+
+
+## Prediction & evaluation
+
+```{r}
+predictions <- predict(lgb_model, newdata = as.matrix(test_data[, -1]))
+
+rmse <- sqrt(mean((predictions - test_data$return)^2))
+cat("RMSE:", rmse, "\n")
+
+mae <- mean(abs(predictions - test_data$return))
+cat("MAE:", mae, "\n")
+
+```
+
+We obtained a really good accuracy for the predictions, with a **MAE** of *0.082*, & **RMSE** of *0.126*.
+
+# Interpretability
+
+In the realm of finance, where money management is pivotal, there is a significant preference for transparent algorithms that support decision-making. Stakeholders demand to understand the underlying reasoning of predictive models, which leads to the crucial distinction between global and local interpretability. 
+
+Global interpretability allows us to comprehend the model's mechanisms over the aggregate data, offering insights on how the model makes decisions across the broad spectrum of data. An exemplar of this is the lightGBM model we trained, whose feature importance chart, displaying the aggregated gains across the ensemble of trees, exemplifies global interpretability. Such clarity is not just academic but practical, allowing for refined models that prioritize transparency in their predictive logic.
+
+## Feature Importance
+
+Feature importance can help in understanding the model's decision-making process and in the reduction of the feature space for more efficient models.
+
+```{r}
+lgb_importance <- lgb.importance(model = lgb_model, percentage = TRUE)
+print(lgb_importance)
+lgb.plot.importance(lgb_importance)
+
+```
+
+**volatility** seems to be the most important feature, contributing the most to the model's predictions, followed by **price_to_book** and **market_cap**. The features **price**, **revenue**, and **debt_to_equity** have lower importance scores in this model.
+
+
