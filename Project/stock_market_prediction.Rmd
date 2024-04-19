@@ -27,7 +27,7 @@ format:
 
 First, let's load the data & the packages.
 
-```{r}
+```{r, warning = F, message = F}
 library(tidyverse)
 library(dplyr)              # for data manipulation
 library(ggplot2)            # For the plots
@@ -63,10 +63,6 @@ tail(return)
 
 We can see that there are 289271 observations (rows) and 13 variables (features) so the dataset is quite large.
 - The last variable called **"return"** is the target variable amd well positioned at the last column.
-- We removed the columns **"ghg_s1"**, **"ghg_s2"**, **"ghg_s3"**, because it is irrelevant.
-
-
-
 
 
 ## Structure and statistics of the dataset
@@ -149,13 +145,15 @@ Couple of points to note :
   7. The `return` variable is quite stable with a mean close to zero and a small standard deviation, suggesting that the dataset might represent a balanced view of stock performance over time.
   
   8. The remaining missing values were replaced by the mean of each column.
+  
+  9. We need to remove the columns **ticker**,  **date**, **"ghg_s1"**, **"ghg_s2"**, **"ghg_s3"**, because they are irrelevant.
 
 
 ## Uni-variate Analysis
 
 ### Categorical Values
 
-The only categorical value is "ticker" and we will analyse the 5 top ones.
+The only categorical value is "ticker" and we will analyse the 10 top ones.
 
 ```{r}
 # Aggregated market_cap by ticker
@@ -172,7 +170,6 @@ aggregated_data_top_n <- aggregated_data |>
 
 ```
 
-
 ```{r}
 # Plot only the top N tickers
 ggplot(aggregated_data_top_n, aes(x = reorder(ticker, -total_market_cap), y = total_market_cap)) +
@@ -183,9 +180,22 @@ ggplot(aggregated_data_top_n, aes(x = reorder(ticker, -total_market_cap), y = to
 
 ```
 
+For positive variables, when tails are very heavy, use the +scale_x_log10() layer for histograms :
+
 ```{r}
-# Using the first 5 tickers to analyse
-top_tickers_data <- head(aggregated_data, 20)
+# Plot only the top N tickers with log-transformed y-axis
+ggplot(aggregated_data_top_n, aes(x = reorder(ticker, -total_market_cap), y = total_market_cap)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  scale_y_log10() + # Log-transform the y-axis
+  theme_minimal() +
+  labs(title = "Total Market Cap by Ticker (Log Scale)", x = "Ticker", y = "Log of Total Market Cap") +
+  coord_flip() # Flip coordinates for horizontal bars
+
+```
+
+```{r}
+# Using the first 10 tickers to analyse
+top_tickers_data <- head(aggregated_data, 10)
 
 # Creating a pie chart
 ggplot(top_tickers_data, aes(x = "", y = total_market_cap, fill = ticker)) +
@@ -194,11 +204,12 @@ ggplot(top_tickers_data, aes(x = "", y = total_market_cap, fill = ticker)) +
   theme_void() + # Remove background and axes
   labs(title = "Market Cap Distribution Among Top Tickers") +
   theme(legend.title = element_blank()) # Hide the legend title
+  
 ```
 
 So we observe that :
 * In the bar charts, coord_flip() is used to flip the chart for better readability, especially when dealing with many tickers.
-* Pie charts are not ideal for datasets with many categories because they can become cluttered and difficult to interpret, so we use only the top 20 tickers for simplicity. 
+* Pie charts are not ideal for datasets with many categories because they can become cluttered and difficult to interpret, so we use only the top 10 tickers for simplicity. 
 
 ### Numerical Values 
 
@@ -451,7 +462,79 @@ cat("MAE:", mae, "\n")
 
 ```
 
-We obtained a really good accuracy for the predictions, with a **MAE** of *0.082*, & **RMSE** of *0.126*.
+We obtained a 8% of error for returns, which is not negligible, with a **MAE** of *0.082*, & **RMSE** of *0.126*.
+
+### Optimisation
+
+```{r}
+n <- nrow(return)
+
+# Adding lagged returns and moving average
+return$lag1 <- lag(return$return, 1)
+return$lag2 <- lag(return$return, 2)
+return$sma5 <- rollmean(return$return, 5, fill = NA, align = 'right')
+
+# Scaling features
+scaled_data <- as.data.frame(scale(return[, c("lag1", "lag2", "sma5")], center = TRUE, scale = TRUE))
+colnames(scaled_data) <- paste(colnames(scaled_data), "scaled", sep = "_")
+return <- cbind(return, scaled_data)
+
+# Splitting data into training and testing sets
+train_indices <- 1:(n * 0.8)
+test_indices <- (n * 0.8 + 1):n
+
+# Creating a validation subset from the test indices
+validation_indices <- sample(test_indices, length(test_indices)/2)
+validation_data <- return[validation_indices, ]
+test_indices <- setdiff(test_indices, validation_indices)
+
+# Update training and testing datasets
+train_data <- return[train_indices, ]
+test_data <- return[test_indices, ]
+
+# Convert datasets to LightGBM format
+dtrain <- lgb.Dataset(data = as.matrix(train_data[, -which(names(train_data) == "return")]), label = train_data$return)
+dtest <- lgb.Dataset(data = as.matrix(test_data[, -which(names(test_data) == "return")]), label = test_data$return)
+
+# Define model parameters
+params <- list(
+  objective = "regression",
+  metric = "mae",
+  num_leaves = 31,
+  learning_rate = 0.05,
+  feature_fraction = 0.9,
+  bagging_fraction = 0.8,
+  bagging_freq = 5,
+  verbose = 0
+)
+
+# Model training with cross-validation
+model <- lgb.cv(
+  params = params,
+  data = dtrain,
+  nfold = 5,
+  nrounds = 100,
+  early_stopping_rounds = 10
+)
+
+# Final model training
+final_model <- lgb.train(
+  params,
+  dtrain,
+  nrounds = 100,  # Set a reasonable static number of rounds
+  valids = list(test = dtest),
+  early_stopping_rounds = 10
+)
+
+# Predicting and calculating errors
+predictions <- predict(final_model, newdata = as.matrix(test_data[, -ncol(test_data)]))
+mae <- mean(abs(predictions - test_data$return))
+rmse <- sqrt(mean((predictions - test_data$return)^2))
+cat("Optimized MAE:", mae, "\n")
+cat("Optimized RMSE:", rmse, "\n")
+```
+I need to recheck this ⬆️.
+
 
 # Interpretability
 
