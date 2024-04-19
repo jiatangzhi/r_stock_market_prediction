@@ -1,7 +1,7 @@
 # Stock Market Prediction
 
 ## Overview
-This project focuses on predicting stock returns using time series analysis and machine learning. The goal is to build a regression model that can forecast future stock returns based on historical data.
+This project focuses on predicting stock returns using time series analysis and machine learning. The goal is to build a regression model that can forecast future stock returns based on historical data. [Visit the page](https://jiatangzhi.github.io/r_stock_market_prediction/).
 
 ## Methodology
 Two main approaches were taken in this project:
